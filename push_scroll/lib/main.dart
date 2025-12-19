@@ -88,6 +88,10 @@ class _PushupCounterAppState extends State<PushupCounterApp> {
   late final PoseDetector _poseDetector;
   bool _isBusy = false;
 
+  // ==================== VISUALIZATION STATE ====================
+  Pose? _lastPose;
+  Size? _inputImageSize;
+
   // ==================== STATE ====================
   int _counter = 0;
   PushupStage _stage = PushupStage.notInPosition;
@@ -182,7 +186,15 @@ class _PushupCounterAppState extends State<PushupCounterApp> {
       final poses = await _poseDetector.processImage(inputImage);
 
       if (poses.isNotEmpty) {
-        _analyzePose(poses.first);
+        final pose = poses.first;
+        // Store data for the overlay painter
+        if (mounted) {
+          setState(() {
+            _lastPose = pose;
+            _inputImageSize = inputImage.metadata?.size;
+          });
+        }
+        _analyzePose(pose);
       } else {
         _setNotInPosition("Body not detected");
       }
@@ -590,6 +602,21 @@ class _PushupCounterAppState extends State<PushupCounterApp> {
           // Camera Preview
           CameraPreview(_controller!),
 
+          // Skeleton Overlay
+          if (_lastPose != null && _inputImageSize != null && _controller != null)
+            LayoutBuilder(
+              builder: (ctx, constraints) {
+                return CustomPaint(
+                  painter: PosePainter(
+                    pose: _lastPose!,
+                    imageSize: _inputImageSize!,
+                    widgetSize: Size(constraints.maxWidth, constraints.maxHeight),
+                    cameraLensDirection: _controller!.description.lensDirection,
+                  ),
+                );
+              },
+            ),
+
           // Main Overlay
           Positioned(
             top: 50,
@@ -776,4 +803,113 @@ class _LandmarkValidation {
     this.message = "",
     this.landmarks,
   });
+}
+/// Draws the skeleton (landmarks and connections) on top of the camera feed
+class PosePainter extends CustomPainter {
+  final Pose pose;
+  final Size imageSize;
+  final Size widgetSize;
+  final CameraLensDirection cameraLensDirection;
+
+  PosePainter({
+    required this.pose,
+    required this.imageSize,
+    required this.widgetSize,
+    required this.cameraLensDirection,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paintLine = Paint()
+      ..color = Colors.white.withOpacity(0.6)
+      ..strokeWidth = 3;
+
+    final paintJoint = Paint()
+      ..color = Colors.cyanAccent
+      ..style = PaintingStyle.fill;
+
+    final paintJointBorder = Paint()
+      ..color = Colors.black45
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 2;
+
+    // Define connections (bone structure)
+    final connections = [
+      [PoseLandmarkType.leftShoulder, PoseLandmarkType.rightShoulder],
+      [PoseLandmarkType.leftShoulder, PoseLandmarkType.leftElbow],
+      [PoseLandmarkType.leftElbow, PoseLandmarkType.leftWrist],
+      [PoseLandmarkType.rightShoulder, PoseLandmarkType.rightElbow],
+      [PoseLandmarkType.rightElbow, PoseLandmarkType.rightWrist],
+      [PoseLandmarkType.leftShoulder, PoseLandmarkType.leftHip],
+      [PoseLandmarkType.rightShoulder, PoseLandmarkType.rightHip],
+      [PoseLandmarkType.leftHip, PoseLandmarkType.rightHip],
+      [PoseLandmarkType.leftHip, PoseLandmarkType.leftKnee],
+      [PoseLandmarkType.leftKnee, PoseLandmarkType.leftAnkle],
+      [PoseLandmarkType.rightHip, PoseLandmarkType.rightKnee],
+      [PoseLandmarkType.rightKnee, PoseLandmarkType.rightAnkle],
+    ];
+
+    // Draw Connections
+    for (final pair in connections) {
+      final start = pose.landmarks[pair[0]];
+      final end = pose.landmarks[pair[1]];
+
+      if (start != null && end != null && start.likelihood > 0.5 && end.likelihood > 0.5) {
+        canvas.drawLine(
+          _scalePoint(start.x, start.y),
+          _scalePoint(end.x, end.y),
+          paintLine,
+        );
+      }
+    }
+
+    // Draw Joints
+    for (final landmark in pose.landmarks.values) {
+      if (landmark.likelihood > 0.5) {
+        final point = _scalePoint(landmark.x, landmark.y);
+        canvas.drawCircle(point, 5, paintJoint);
+        canvas.drawCircle(point, 5, paintJointBorder);
+      }
+    }
+  }
+
+  Offset _scalePoint(double x, double y) {
+    // Determine scaling factors
+    // Note: imageSize.width is actually the height in portrait mode due to sensor orientation
+    final double scaleX = widgetSize.width / imageSize.height; 
+    final double scaleY = widgetSize.height / imageSize.width;
+    
+    // On Android, the raw image is rotated 270/90 degrees.
+    // ML Kit coordinates are relative to that raw image.
+    // We usually need to swap X and Y scaling for Portrait apps.
+    
+    double screenX, screenY;
+
+    if (Platform.isAndroid) {
+       screenX = x * scaleX;
+       screenY = y * scaleY;
+       
+       // Flip X for front camera (mirror effect)
+       if (cameraLensDirection == CameraLensDirection.front) {
+         screenX = widgetSize.width - screenX;
+       }
+    } else {
+      // iOS handling (standard scaling)
+      final double iosScaleX = widgetSize.width / imageSize.width;
+      final double iosScaleY = widgetSize.height / imageSize.height;
+      screenX = x * iosScaleX;
+      screenY = y * iosScaleY;
+      
+      if (cameraLensDirection == CameraLensDirection.front) {
+         screenX = widgetSize.width - screenX;
+       }
+    }
+
+    return Offset(screenX, screenY);
+  }
+
+  @override
+  bool shouldRepaint(covariant PosePainter oldDelegate) {
+    return oldDelegate.pose != pose;
+  }
 }
